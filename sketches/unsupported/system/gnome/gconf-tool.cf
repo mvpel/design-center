@@ -1,0 +1,140 @@
+# Michael V. Pelletier - January 17, 2013
+
+body common control
+{
+  bundlesequence => { "test" };
+  inputs => { "cfengine_stdlib.cf" };
+}
+
+bundle agent test
+{
+  methods:
+    "abc" usebundle => gconf_set("xml:readwrite:/home/pelletm/.gconf",
+                "/apps/gdm/simple-greeter/disable_user_list", "bool:true");
+#    "xyz" usebundle => gconf_set("xml:readwrite:/etc/gconf/gconf.xml.defaults",
+#                "/apps/gdm/simple-greeter/banner_message_text", "string:Testing 123");
+
+}
+
+# Manage GNOME 2 configuration keys using the gconftool-2 command.
+# - The --direct option is needed because it's likely that cf-agent
+#   will not have an X session available, and thus won't be able
+#   to autolaunch the gconfd-2 daemon.
+# - Running gconftool-2 under "dbus-launch --exit-with-session"
+#   crushes performance, resulting in multi-second real runtimes,
+#   even when in desired state.
+#
+# Examples:
+#   "list" usebundle =>
+#          gconf_set("xml:readwrite:/etc/gconf/gconf.xml.defaults",
+#                    "/apps/gdm/simple-greeter/disable_user_list", "bool:true");
+# "prompt" usebundle =>
+#          gconf_unset("xml:readwrite:/etc/gconf/gconf.xml.defaults",
+#                      "/desktop/gnome/remote_access_prompt_enabled");   
+#
+# A key which is unset uses the default defined in the schema, if any.
+# Remember, a key set to the null string is not the same as an unset key.
+
+bundle agent gconf_set(cfgsrc, key, data)
+{
+  methods:
+    "any" usebundle => gconf_main("$(this.bundle)");
+}
+
+bundle agent gconf_unset(cfgsrc, key)
+{
+  methods:
+    "any" usebundle => gconf_main("$(this.bundle)");
+}
+
+bundle agent gconf_main(mode)
+{
+  vars:
+    any::
+      "gconftool" string => "/usr/bin/gconftool-2";
+
+    # Don't get the current value until we verify everything
+    ok_to_run.!have_curval::
+      "curval" string =>
+         execresult("$(gconftool) --direct --config-source=$($(mode).cfgsrc) --get '$($(mode).key)'",
+                    "noshell"),
+               action => if_elapsed("1");
+    # We may need to tweak this to cut out warnings when
+    # running direct under a valid X session with a gconfd-2.
+
+  classes:
+    any::
+          "$(mode)" expression => "any"; # gconf_set or gconf_unset
+       "valid_tool" expression => isexecutable("$(gconftool)");
+
+    valid_tool::
+     "valid_cfgsrc" expression => regcmp("[^:]+:(readonly|readwrite):\S+", "$($(mode).cfgsrc)");
+        "valid_key" expression => regcmp("\h*/.+\h*", "$($(mode).key)");
+       "valid_data" expression => regextract("^\h*(int|bool|float|string|list|pair):(.*)",
+                                             "$($(mode).data)", "tv"),
+                       comment => "$(data) of 'type:value' gives type in \$(tv[1]) and value in \$(tv[2])";
+
+      "ok_to_write" expression => regcmp("[^:]+:readwrite:.+", "$($(mode).cfgsrc)");
+      "have_curval" expression => isvariable("curval");
+
+    gconf_set::
+        "ok_to_run" expression => "valid_cfgsrc.valid_key.valid_data";
+
+    gconf_unset::
+        "ok_to_run" expression => "valid_cfgsrc.valid_key";
+
+    # Determine if a repair is needed
+    have_curval.gconf_set::
+      "repair_needed"      not => strcmp("$(curval)", "$(tv[2])");
+
+    have_curval.gconf_unset::
+      "repair_needed"      not => regcmp(".*No value set for .*", "$(curval)");
+
+  #----------------
+  # Repairs
+  commands:
+    gconf_set.repair_needed.ok_to_run.ok_to_write::
+      "$(gconftool) --direct --config-source=$($(mode).cfgsrc) --type '$(tv[1])' --set '$($(mode).key)' '$(tv[2])'",
+          action => if_elapsed("1");
+
+    gconf_unset.repair_needed.ok_to_run.ok_to_write::
+      "$(gconftool) --direct --config-source=$($(mode).cfgsrc) --unset '$($(mode).key)'",
+          action => if_elapsed("1");
+
+  #----------------
+  # Error reporting
+  reports:
+    !valid_tool::
+      " !! $(mode): cannot execute '$(gconftool)";
+    !valid_cfgsrc.valid_tool::
+      " !! $(mode): invalid config source: '$($(mode).cfgsrc)'";
+    !valid_key.valid_tool::
+      " !! $(mode): invalid key: '$($(mode).key)'";
+    !valid_data.gconf_set::
+      " !! $(mode): invalid data for key '$($(mode).key)': type '$(tv[1])', value '$(tv[2])";
+    repair_needed.!ok_to_write::
+      " !! $(mode): key '$($(mode).key)' needs repair, but source '$($(mode).cfgsrc)' is read-only";
+}
+
+# Testcases
+#   Set an invalid gconftool path
+#   Use an invalid config source
+#     spaces before or after
+#     nonexistent
+#     bad characters
+#     newlines
+#   No file permission on config source
+#   Use an invalid key
+#     spaces before or after
+#     bad characters
+#     newlines
+#   Use a read-only key
+#   Use an invalid value
+#     Single quote in text
+#     Determine need for escaping
+#   Set a value to the empty string
+#     Should be valid, I think - test gconftool
+#   Set a value to the "value not set" string
+#     Perhaps there's a different way to detect it?
+#   Unset a nonexistent value
+#     Should be regarded as "kept"
