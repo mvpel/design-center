@@ -68,6 +68,7 @@ sub list
     my $self = shift;
     my $terms = shift;
     my $noactivations = shift || 0;
+    my $puredata = shift;
 
     my $res = {};
 
@@ -80,15 +81,22 @@ sub list
         return $res;
       }
       foreach my $sketch (@sketches) {
+       if ($puredata)
+       {
+        $res->{$sketch} = $contents->{$sketch};
+       }
+       else
+       {
         # Create new Sketch object
         $res->{$sketch} = DesignCenter::Sketch->new(name => $sketch, %{$contents->{$sketch}});
         # Set installed to its full install location
         $res->{$sketch}->installed($res->{$sketch}->fulldir);
+       }
       }
     }
 
     # Merge activation info
-    unless ($noactivations) {
+    unless ($noactivations || $puredata) {
       my $activations = $self->activations;
       foreach my $sketch (sort keys %$activations) {
         next unless exists($res->{$sketch});
@@ -150,6 +158,9 @@ sub generate_runfile
   {
     my $self=shift;
     my $standalone = shift;
+    # If given, this parameter must be a regex that indicates which files should be
+    # omitted from the "inputs" declaration. Used to omit stdlib on the non-standalone runfile.
+    my $omit_files = shift;
     $standalone = DesignCenter::Config->standalone unless defined($standalone);
     # If a filename is given, use it as is always. If we are using the default,
     # modify it depending on $standalone
@@ -333,7 +344,9 @@ sub generate_runfile
         if DesignCenter::Config->verbose;
     }
 
-    my $includes = join ', ', map { my @p = DesignCenter::JSON::recurse_print($_); $p[0]->{value} } Util::uniq(@inputs);
+    my $includes = join ', ',
+      map { my @p = DesignCenter::JSON::recurse_print($_); $p[0]->{value} }
+        grep { !$omit_files || $_ !~ /$omit_files/ } Util::uniq(@inputs);
 
     # maybe make the run template configurable?
     my $output = make_runfile($template_activations, $includes, $standalone, $run_file);
